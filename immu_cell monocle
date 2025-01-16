@@ -1,0 +1,98 @@
+# load cell 
+Idents(mtx) <- 'celltype'
+mtxi <- subset(mtx,idents=c("Foetal_Immune","Normal_Immune",'Tumour_Immune'))
+
+mtxi <- FindNeighbors(mtxi, reduction = "integrated.rpca", dims = 1:30)
+mtxi <- FindClusters(mtxi, resolution = 0.5, cluster.name = "rpca_clusters")
+mtxi <- RunUMAP(mtxi, reduction = "integrated.rpca", dims = 1:10, reduction.name = "umap.rpca")
+DimPlot(
+  mtxi,
+  reduction = "umap.rpca",
+  group.by = 'Compartment',label = T,
+  combine = FALSE
+)
+
+mark <- c( 
+          "CD3D", "CD3E", "CD3G","KLRD1", "PRF1", "GNLY",'NKG7',
+          "CD79A", "CD79B", "KIT",'CPA3',"ITGAX", "CD68", "CD14",'IGHA1','IGHG2','S100A8')
+DotPlot(mtxi, features = mark,cols = c('#FFFFFF','#FF0033') ) + RotatedAxis()+theme_test()+
+  theme(legend.position = 'top',axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))+xlab('')+ylab('')
+
+Idents(mtxi) <- 'seurat_clusters'
+new.cluster.ids <- c('T_cell','NKT','Myeloid','NKT','T_cell','NKT',
+                     'Neutrophils','NKT','Myeloid','T_cell','Neutrophils2',
+                     'unkown','Mast','B_cell','unkown','unkown','unkown','unkown')
+names(new.cluster.ids) <- levels(mtxi)
+mtxi <- RenameIdents(mtxi, new.cluster.ids)
+mtxi$celltype<-Idents(mtxi)
+DimPlot(
+  mtxi,
+  reduction = "umap.rpca",
+  group.by = 'celltype',label = T,
+  combine = FALSE,split.by = 'Compartment'
+)
+FeaturePlot(mtxi, features = c('COL1A2'))
+mtxi <- subset(mtxi,idents=c("unkown"),invert=T)
+mtxi <- RunUMAP(mtxi, reduction = "integrated.rpca", dims = 1:10, reduction.name = "umap.rpca")
+
+FeaturePlot(mtxi,features = c('PHYHD1'),raster = T,pt.size = 3,split.by = 'Compartment')
+VlnPlot(object = mtxi, features = c('PHYHD1'), 
+        split.by = 'Compartment',pt.size = 0.5)
+DotPlot(mtxi, features = 'PHYHD1',group.by = 'combined_group',cols = c('#FFFFFF','#FF0033') ) + RotatedAxis()+theme_test()+
+  theme(legend.position = 'top',axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))+xlab('')+ylab('')
+
+Tc <- subset(mtxi,idents=c('T_cell'))
+library(monocle)
+library(Seurat)
+library(dplyr)
+library(patchwork)
+
+data = as(as.matrix(Tc@assays$RNA@layers$data), "sparseMatrix")
+pd = new("AnnotatedDataFrame", data = Tc@meta.data)
+pData <- pd@data
+fData = data.frame(gene_short_name = row.names(Tc@assays$RNA), row.names = row.names(Tc@assays$RNA))
+fd = new("AnnotatedDataFrame", data = fData)
+st_new = newCellDataSet(data, phenoData = pd, featureData = fd, 
+                        lowerDetectionLimit = 0.5, expressionFamily = negbinomial.size()) # igraph 
+
+#estimate SizeFactor and Dispersions
+# detach("package:monocle3", unload = TRUE)
+st_new <- estimateSizeFactors(st_new)
+st_new <- estimateDispersions(st_new)
+
+st_new <- detectGenes(st_new, min_expr = 0.1)
+print(head(fData(st_new)))
+expressed_genes <- row.names(subset(fData(st_new),
+                                    num_cells_expressed >= 10))
+
+## Constructing Single Cell Trajectories
+# choose genes
+diff_test_res <- differentialGeneTest(st_new[expressed_genes,],fullModelFormulaStr = "~Compartment")
+ordering_genes <- row.names(subset(diff_test_res, qval < 1e-5))
+st_new <- setOrderingFilter(st_new, ordering_genes)
+st_new <- reduceDimension(st_new, method = 'DDRTree',max_components = 2)
+st_new <- orderCells(st_new) 
+
+# plot
+plot_cell_trajectory(st_new,cell_size = 1,color_by = "State")+theme_bw()+
+  theme(panel.grid = element_blank()) +
+  theme(plot.title = element_text(hjust = 0.5,size = 20, face = "bold"),axis.text=element_text(size=12,face = "bold"),
+        axis.title.x=element_text(size=14),axis.title.y=element_text(size=14))
+plot_cell_trajectory(st_new,cell_size = 1,color_by = "Compartment")+
+  scale_color_manual(values = c("#B5CE4E","#52AADC", "#EC6E66"))+theme_bw()+
+  theme(panel.grid = element_blank()) +
+  theme(plot.title = element_text(hjust = 0.5,size = 20, face = "bold"),axis.text=element_text(size=12,face = "bold"),
+        axis.title.x=element_text(size=14),axis.title.y=element_text(size=14))
+
+# Extracting gene expression and pseudotime data
+gene_expr <- data.frame(
+  pseudotime = st_new$Pseudotime,  
+  expression = exprs(st_new)["PHYHD1", ]  
+)
+library(ggplot2)
+ggplot(gene_expr, aes(x = pseudotime, y = expression)) +
+  geom_smooth(method = "loess", se = TRUE, color = "#416080", linetype = "dashed") + 
+  labs(x = "Pseudotime", y = "Expression")+theme_test()
+
+
+
