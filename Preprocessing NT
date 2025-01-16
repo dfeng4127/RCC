@@ -1,0 +1,84 @@
+library(rtracklayer)
+library(dplyr)
+library(plyr)
+library(Seurat)
+library(ggsci)
+library(ggplot2)
+library(xlsx)
+setwd('H:/RCC/science_2018/')
+gene <- read.table(file = './tableOfCounts_rowLabels.tsv',
+                            header = T,sep = '\t')
+cell <- read.table(file = './tableOfCounts_colLabels.tsv',
+                        header = T,sep = '\t')
+mtx <- Matrix::readMM('./tableOfCounts.mtx')
+cm <-read.csv('./cell_manifest.csv',header = T)
+
+rownames(mtx) <- gene$Symbol
+colnames(mtx) <- cell$Barcode
+mtx <- mtx[!duplicated(rownames(mtx)),!duplicated(colnames(mtx))] 
+mtx <- CreateSeuratObject(counts = mtx, project = "mtx")
+
+
+# QC and selecting cells for further analysis
+mtx[["percent.mt"]] <- PercentageFeatureSet(mtx, pattern = "^MT-")
+VlnPlot(mtx, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3,pt.size = -1)
+mtx <- subset(mtx, subset = nFeature_RNA > 200 & nFeature_RNA < 3000 & percent.mt < 10)
+
+mtx$barcode <- rownames(mtx@meta.data)
+cm <-cm[!duplicated(cm$barcode),]
+mtx@meta.data <- left_join(mtx@meta.data,cm, by ='barcode')
+rownames(mtx@meta.data) <- mtx$barcode
+saveRDS(mtx,file = './mtx.rds')
+
+mtx$Experiment <- sapply(strsplit(mtx$Source,'_'),"[",1)
+
+mtx[["RNA"]] <- split(mtx[["RNA"]], f = mtx$Experiment)
+mtx <- NormalizeData(mtx)
+mtx <- FindVariableFeatures(mtx)
+mtx <- ScaleData(mtx)
+mtx <- RunPCA(mtx)
+options(future.globals.maxSize = 8000 * 1024^2)
+mtx <- IntegrateLayers(
+  object = mtx, method = RPCAIntegration,
+  orig.reduction = "pca", new.reduction = "integrated.rpca",
+  verbose = FALSE
+)
+
+# integrated.rcpa
+mtx <- FindNeighbors(mtx, reduction = "integrated.rpca", dims = 1:30)
+mtx <- FindClusters(mtx, resolution = 0.5, cluster.name = "rpca_clusters")
+mtx <- RunUMAP(mtx, reduction = "integrated.rpca", dims = 1:10, reduction.name = "umap.rpca")
+DimPlot(
+  mtx,
+  reduction = "umap.rpca",
+  group.by = 'Compartment',
+  combine = FALSE, label.size = 2
+)
+
+# JoinLayers
+mtx<- JoinLayers(mtx)
+FeaturePlot(mtx,features = c('PHYHD1'),raster = T,pt.size = 3)
+VlnPlot(mtx,features = c('PHYHD1'),group.by = 'Compartment')
+
+Idents(mtx) <- 'Compartment'
+new.cluster.ids <- c('Normal_Epithelium','Normal_Immune','Normal_Epithelium','Indistinct','Tumour_Epithelium_and_Vascular',
+                     'Tumour_Immune','Foetal_Epithelium_and_Vascular','Foetal_Immune')
+names(new.cluster.ids) <- levels(mtx)
+mtx <- RenameIdents(mtx, new.cluster.ids)
+mtx$celltype<-Idents(mtx)
+mtx$celltype<-factor(mtx$celltype,levels =c( "Foetal_Epithelium_and_Vascular", "Foetal_Immune",
+                                             'Normal_Epithelium','Normal_Immune',
+                                             "Tumour_Epithelium_and_Vascular","Tumour_Immune",
+                                             'Indistinct' ) )
+mtx$celltype <- factor(mtx$celltype,levels = c( "Foetal_Epithelium_and_Vascular", "Foetal_Immune",
+                                            'Normal_Epithelium','Normal_Immune',
+                                            "Tumour_Epithelium_and_Vascular","Tumour_Immune",
+                                            'Indistinct' ))
+DimPlot(mtx,reduction = "umap.rpca",
+  group.by = 'celltype', pt.size = 2,raster = T)+
+  scale_color_manual(values = c("#B5CE4E", "#C89736", "#52AADC", "#2D8875", "#EC6E66",
+                               "#BD7795" ,"#7C7979"))+theme_test()+  
+  theme(plot.title = element_text(hjust = 0.5,size = 20, face = "bold"),axis.text=element_text(size=12,face = "bold"),
+        axis.title.x=element_text(size=14),axis.title.y=element_text(size=14))
+
+
